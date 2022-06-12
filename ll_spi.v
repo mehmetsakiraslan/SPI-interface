@@ -4,35 +4,24 @@
 `include "sabitler.vh"
 `endif
 
-`define PRESCALE        10'd5
+`define PRESCALE        16'd5
 `define FIFO_DEPTH      `ADRES_BIT
 
 
 module ll_spi (
     // AXI4 LITE SLAVE signals
     // Global Signals
-    input                       ACLK,
-    input                       ARESET,
-    // Write Address Channel
-    input [`ADRES_BIT - 1:0]    AWADDR,
-    input                       AWVALID,
-    output                      AWREADY,
-    // Write Data Channel
-    input [`VERI_BIT - 1:0]     WDATA,
-    input                       WVALID,
-    output                      WREADY,
-    // Write Response Channel
-    input                       BREADY,
-    output                      BVALID,
-    // Read Address Channel
-    input [`ADRES_BIT - 1:0]    ARADDR,
-    input                       ARVALID,
-    output                      ARREADY,
-    // Read Data Channel
-    input                       RREADY,
-    output [`VERI_BIT - 1:0]    RDATA,
-    output                      RVALID,
-
+    input                       clk_g,
+    input                       rst_g,
+   
+    input  [`ADRES_BIT - 1:0]   at_adres_c,                                     
+    output [31:0]               at_oku_veri_g,                                   
+    output                      at_oku_gecerli_g, // =valid.                                
+    input  [31:0]               at_yaz_veri_c,                                   
+    input                       at_yaz_gecerli_c,                                
+    input                       at_gecerli_c,                                    
+    output                      at_mesgul_g,                                      
+    
     // spi i/o
     input               in_so,
     output              out_si,
@@ -40,213 +29,334 @@ module ll_spi (
     output              out_sck
     );
     
-    reg [7:0] miso_buffer [31:0];
-    reg [7:0] miso_buffer_next [31:0];
+    reg [31:0] miso_buffer [7:0];
+    reg [31:0] miso_buffer_next [7:0];
+    //reg [3:0] miso_head, miso_head_next;
+    reg [3:0] miso_tail, miso_tail_next;
     
-    reg [7:0 ]mosi_buffer [31:0];
-    reg [7:0 ]mosi_buffer_next [31:0];
+    reg [31:0] mosi_buffer [7:0];
+    reg [31:0] mosi_buffer_next [7:0];
+    //reg [3:0] mosi_head, mosi_head_next;
+    reg [3:0] mosi_tail, mosi_tail_next;
+    
+    reg [31:0] spi_ctrl, spi_ctrl_next;
+    
+    // reg [3:0] spi_status, spi_status_next;
+    
+    reg [`FIFO_DEPTH-1:0]  spi_rdata, spi_rdata_next; // fifo in
+     
+    reg [`FIFO_DEPTH:0]  spi_wdata, spi_wdata_next; // fifo out   
+ 
+    
+    reg [13:0] spi_cmd, spi_cmd_next;
+    
+    // Kontrol Sinyalleri
+    wire spi_en;
+    assign spi_en = spi_ctrl[0];
+    
+    wire spi_rst;
+    assign spi_rst = spi_ctrl[1];
+    
+    wire cpha;
+    assign cpha = spi_ctrl[2];
+    
+    wire cpol;
+    assign cpol = spi_ctrl[3];
+    
+    wire [15:0] sck_div;
+    assign sck_div = spi_ctrl[31:16];
+    
+    wire [8:0] lenght;
+    assign lenght = spi_cmd[8:0] << 3; //?????????????????????????????????????????????????
+    
+    wire cs_active;
+    assign cs_active = spi_cmd[9];
+    
+    // wire [1:0] direction;
+    // assign direction = spi_cmd[13:12];
+    
+    wire miso_en;
+    assign miso_en = spi_cmd[12];
+    
+    wire mosi_en;
+    assign mosi_en = spi_cmd[13];
+    
+    wire mosi_full;
+    assign mosi_full = (mosi_tail == 4'd8); // spi_status[0];
+    
+    wire miso_full;
+    assign miso_full = (miso_tail == 4'd8); // spi_status[1];
+    
+    wire mosi_empty;
+    assign mosi_empty = (mosi_tail == 4'd0); // spi_status[2];
+    
+    wire miso_empty;
+    assign miso_empty = (miso_tail == 4'd0); // spi_status[3];
+    
+    
+    
+    localparam [5:0]
+       CTRL = 5'h00,
+       STATUS = 5'h04,
+       RDATA = 5'h08,
+       WDATA = 5'h0c,
+       CMD = 5'h10;
+    
     
     localparam [2:0]
        IDLE = 3'b001,
-       WRITE= 3'b010,
-       READ = 3'b100 ;
-    
-    //spi i/o registers
+       WRITE = 3'b010,
+       READ = 3'b100;
+           
     reg r_cs, r_cs_next;
     reg r_sck, r_sck_next;
     reg r_spi_sr, r_spi_sr_next;   // 1 i_clk cycle retarted sck to prevent race conditions while driving slave device,
                                      // would not work if prescale is 1.
-    (*dont_touch = "true"*)  reg [2:0]       state; 
-    reg [2:0] state_next;
-    reg [9:0]       clock_ctr, clock_ctr_next;
-    reg [9:0]       bit_ctr, bit_ctr_next;
-    reg             valid, valid_next; // AXI arayuzu icin
-    reg             valid_flag, valid_flag_next;
-    reg             busy, busy_next;
-    
-    reg [`FIFO_DEPTH:0]  fifo, fifo_next;  
-    
-    reg read_flag, read_flag_next;
-    reg [5:0] clock_reg, clock_reg_next; 
-
+    reg [2:0] state, state_next; 
+    reg [15:0] clock_ctr, clock_ctr_next;
+    reg [8:0] bit_ctr, bit_ctr_next;
+    reg valid, valid_next; 
+    reg busy, busy_next;
     
     assign out_cs = r_cs;
-    assign out_sck= r_spi_sr;
+    assign out_sck = r_spi_sr;
+    assign out_si = spi_wdata[32];
+    assign at_oku_veri_g = spi_rdata;
+    assign at_mesgul_g = busy;
+    assign at_oku_gecerli_g = valid;
     
-    assign RDATA = fifo[`FIFO_DEPTH-1:0];
-    assign RVALID= valid;
-    assign BVALID= valid;
     
-    assign ARREADY  = ~busy;
-    assign WREADY   = ~busy;
-    assign AWREADY  = ~busy;
-    
-    reg [4:0] ts_cycle, ts_cycle_next;
-    
-    // i/o shift register.
-    assign out_si = fifo[ts_cycle];
-    
+    integer loop_counter;
     always@* begin
-        state_next      = state;
-        clock_ctr_next  = clock_ctr;
-        bit_ctr_next    = bit_ctr;
-        valid_next      = valid;
-        busy_next       = busy;
-        valid_flag_next = valid_flag;
-        fifo_next       = fifo;
-        
-        read_flag_next  = read_flag; 
-        ts_cycle_next   = ts_cycle;
-        
-        r_cs_next       = r_cs;
-        r_sck_next      = r_sck;
-        r_spi_sr_next   = r_sck;
-        
-        clock_reg_next  = clock_reg;
+        for(loop_counter=0; loop_counter<8; loop_counter=loop_counter+1) begin  
+            miso_buffer_next[loop_counter] = miso_buffer[loop_counter];
+        end
+        miso_tail_next = miso_tail;
+        for(loop_counter=0; loop_counter<8; loop_counter=loop_counter+1) begin  
+            mosi_buffer_next[loop_counter] = mosi_buffer[loop_counter];
+        end
+        mosi_tail_next = mosi_tail;
+        spi_ctrl_next = spi_ctrl;
+        // spi_status_next = spi_status;
+        spi_rdata_next = spi_rdata;
+        spi_wdata_next = spi_wdata;
+        spi_cmd_next = spi_cmd;
+ 
+        r_cs_next = r_cs;
+        r_sck_next = r_sck;
+        r_spi_sr_next = r_sck;
+        state_next = state;
+        clock_ctr_next = clock_ctr;
+        bit_ctr_next = bit_ctr;
+        valid_next = valid;
+        busy_next = busy;
+               
         
         if(clock_ctr > 0) begin
-            clock_ctr_next  = clock_ctr - 10'd1;
+            clock_ctr_next  = clock_ctr - 16'd1;
         end
-        else if(clock_ctr == 10'd0) begin
+        else if((clock_ctr == 16'd0)) begin
             case(state)
             
-            IDLE: // IDLE
+            IDLE: // IDLE: Kontrol yazmaclarina deger atama kismi burasi, her cycle yazmac degerlerine gore seri iletim gerceklesicek
             begin
-                if(!valid_flag) begin
-                    if (~busy && AWADDR[24] && WVALID && AWVALID) begin // yazma-write istegi, input 
-                        clock_ctr_next  = `PRESCALE - 10'd1;
-                        bit_ctr_next    = AWADDR[4:0];      
-                        state_next      = WRITE;
-                        fifo_next       = WDATA;
-                        busy_next       = 1'b1;
-                        
-                        ts_cycle_next   = AWADDR[4:0];
-                        
-                        r_cs_next       = 1'b0;
-                        r_sck_next      = 1'b0;
-                    end
-                    else if(~busy && ARADDR[25] && ARVALID) begin
-                        clock_ctr_next  = `PRESCALE - 10'd1;
-                        bit_ctr_next    = ARADDR[11:6]; 
-                        state_next      = WRITE;
-                        busy_next       = 1'b1;
-                        
-                        fifo_next       = ARADDR[23:12]; 
-                        read_flag_next  = 1'b1;
-                        clock_reg_next  = ARADDR[5:0]; 
-                        ts_cycle_next   = ARADDR[11:6];
-                        
-                        r_cs_next       = 1'b0;
-                        r_sck_next      = 1'b0;
-                    end
-                    else begin
-                        clock_ctr_next  = 10'b0;
-                        state_next      = IDLE;
-                        valid_next      = 1'b0;
-                        busy_next       = 1'b0;
-                        
-                        r_cs_next       = 1'b1;
-                        r_sck_next      = 1'b0; 
-                    end
+                if(spi_en && mosi_en && (!miso_en)) begin // si -> yaz 
+                    clock_ctr_next = sck_div;
+                    bit_ctr_next = lenght;
+                    state_next = WRITE;
+                    busy_next = 1'b1;
+                    
+                    spi_wdata_next = {1'b0, mosi_buffer[0]};
+                    r_sck_next = cpol;
+                    r_cs_next = 1'b0;
+                end
+                else if(spi_en && miso_en && (!mosi_en)) begin // so -> oku
+                    clock_ctr_next = sck_div;
+                    bit_ctr_next = lenght;
+                    state_next = READ;
+                    busy_next = 1'b1;
+                    
+                    r_sck_next = cpol;
+                    r_cs_next = 1'b0;
                 end
                 else begin
-                    valid_flag_next = 1'b0;
-                    valid_next      = 1'b1;
-                    busy_next       = 1'b1;
-                    r_sck_next      = 1'b0; 
-                    clock_ctr_next  = `PRESCALE - 10'd1;//10'd0;
+                    clock_ctr_next = 16'd0;
+                    state_next = IDLE;
                     
-                    r_cs_next       = 1'b1;
-                    state_next      = IDLE;
+                    r_cs_next = 1'b1;
+                    r_sck_next = cpol;
                 end
             end
             
-            WRITE: // yazma islemi
+            READ: 
             begin
-                clock_ctr_next  = `PRESCALE - 10'd1;
-                if(bit_ctr == 10'd0) begin
-                    if(read_flag) begin
-                        read_flag_next  = 1'b0;
-                        state_next      = READ;
-                        bit_ctr_next    = clock_reg;
-                        ts_cycle_next   = clock_reg;
-                        r_sck_next      = 1'b0;
-                    end
-                    else begin
-                        state_next      = IDLE;
-                        valid_flag_next = 1'b1; // valid birden fazla çevrim high'da kaliyor bunu kontrol et.
-                        valid_next      = 1'b0;
-                        //clock_ctr_next  = 10'd0;
-                        r_cs_next       = 1'b0;
-                        r_sck_next      = 1'b0;
-                    end
+                clock_ctr_next  = sck_div;
+                if(bit_ctr == 16'd0) begin
+                   state_next = IDLE;
+                   clock_ctr_next = 16'd0;
+                   busy_next = 1'b0;
+                   
+                   miso_buffer_next[miso_tail-1] = spi_rdata;
+                   miso_tail_next = miso_tail + 4'd1;
+                   
+                   r_cs_next = cs_active ? 1'b0 : 1'b1;
+                   r_sck_next  = 1'b0;
                 end
                 else begin
                     r_sck_next  = ~r_sck_next;
-                    state_next  = WRITE;
+                    state_next = READ;
                     if(!r_sck) begin
-                        bit_ctr_next    = bit_ctr - 10'd1;
-                        fifo_next       = {fifo[`FIFO_DEPTH-2:0], 1'b0};
+                        bit_ctr_next    = bit_ctr - 16'd1;
+                        spi_rdata_next       = {spi_rdata[`FIFO_DEPTH-2:0], in_so};
                     end
                 end
             end
             
-            READ: // islem
+            WRITE: 
             begin
-                clock_ctr_next  = `PRESCALE - 10'd1;
-                if(bit_ctr == 10'd0) begin
-                    state_next      = IDLE;
-                    
-                    valid_flag_next = 1'b1;
-                    valid_next      = 1'b0;
-                    //clock_ctr_next  = 10'd0;
-                    r_cs_next       = 1'b0;
-                    r_sck_next      = 1'b0;
+                clock_ctr_next  = sck_div;
+                if(bit_ctr == 16'd0) begin
+                   state_next = IDLE;
+                   clock_ctr_next = 16'd0;
+                   busy_next = 1'b0;
+                   
+                   mosi_buffer_next[0] = mosi_buffer[1];
+                   mosi_buffer_next[1] = mosi_buffer[2];
+                   mosi_buffer_next[2] = mosi_buffer[3];
+                   mosi_buffer_next[3] = mosi_buffer[4];
+                   mosi_buffer_next[4] = mosi_buffer[5];
+                   mosi_buffer_next[5] = mosi_buffer[6];
+                   mosi_buffer_next[6] = mosi_buffer[7];
+                   mosi_buffer_next[7] = 32'd0;
+                   
+                   r_cs_next = cs_active ? 1'b0 : 1'b1;
+                   r_sck_next  = 1'b0;
                 end
                 else begin
                     r_sck_next  = ~r_sck_next;
-                    state_next  = READ;
+                    state_next = WRITE;
                     if(!r_sck) begin
-                        bit_ctr_next    = bit_ctr - 10'd1;
-                        fifo_next       = {fifo[`FIFO_DEPTH-2:0], in_so};
+                        bit_ctr_next = bit_ctr - 16'd1;
+                        spi_wdata_next = {spi_wdata[`FIFO_DEPTH-1:0], 1'b0};
                     end
                 end
             end
             
             endcase
+            
+            if(!busy) begin  
+            case(at_adres_c[4:0])      
+            
+            STATUS: // Sadece okuma yazmaci
+            begin
+                spi_rdata_next = {miso_empty, mosi_empty, miso_full, mosi_full};
+                valid_next = 1'b1;
+            end
+            
+            CTRL: 
+            begin
+                if(at_yaz_gecerli_c && at_gecerli_c) begin
+                    spi_ctrl_next = at_yaz_veri_c;// && 32'hFFFF000F;
+                end
+                else begin
+                    spi_rdata_next = spi_ctrl;
+                end
+            end 
+            
+            CMD: 
+            begin
+                if(at_yaz_gecerli_c && at_gecerli_c) begin
+                    spi_cmd_next = at_yaz_veri_c;//&& 32'h000031FF; // 0011_0011_1111_1111 *********************************** mask yanli
+                end
+                else if(at_gecerli_c) begin
+                    spi_rdata_next = spi_cmd;
+                end
+                                
+            end 
+            
+            RDATA: 
+            begin
+                if(!miso_empty) begin
+                    spi_rdata_next = miso_buffer[0];
+                    valid_next = 1'b1;
+                    
+                    miso_buffer_next[0] = miso_buffer[1];
+                    miso_buffer_next[1] = miso_buffer[2];
+                    miso_buffer_next[2] = miso_buffer[3];
+                    miso_buffer_next[3] = miso_buffer[4];
+                    miso_buffer_next[4] = miso_buffer[5];
+                    miso_buffer_next[5] = miso_buffer[6];
+                    miso_buffer_next[6] = miso_buffer[7];
+                    miso_buffer_next[7] = 32'd0;
+                    
+                    miso_tail_next = miso_tail - 4'd1;
+                end 
+            end
+            
+            WDATA: 
+            begin
+                if(!mosi_full) begin
+                    mosi_buffer_next[(mosi_empty?mosi_tail:(mosi_tail-1))] = at_yaz_veri_c;
+                    mosi_tail_next = mosi_tail + 4'b1;
+                    
+                    valid_next = 1'b1;
+                end
+            end
+            
+            endcase
+        end
+        
         end
     end
     
-    always@(posedge ACLK) begin
-        if(ARESET) begin
-            state   <= 3'b001;
-            clock_ctr<= 10'd0;
-            bit_ctr <= 10'd0;
-            valid   <= 1'b0;
-            busy    <= 1'b0;
-            valid_flag<= 1'b0;
-            fifo    <= {`FIFO_DEPTH {1'b0}};
-            read_flag<= 1'b0;
-            clock_reg <= 5'd0;
-            ts_cycle <= 5'd0;
-            r_cs    <= 1'b1;
-            r_sck   <= 1'b0;
-            r_spi_sr<= 1'b0;
+    always@(posedge clk_g) begin
+        if(spi_rst || rst_g) begin
+            for(loop_counter=0; loop_counter<8; loop_counter=loop_counter+1) begin  
+            miso_buffer[loop_counter] <= 32'd0;
+            end
+            miso_tail <= 4'd0;
+            for(loop_counter=0; loop_counter<8; loop_counter=loop_counter+1) begin  
+                mosi_buffer[loop_counter] <= 32'd0;
+            end
+            mosi_tail <= 4'd0;
+            spi_ctrl <= 32'd0;
+            // spi_status_next = 4'd0;
+            spi_rdata <= 32'd0;
+            spi_wdata <= 33'd0;
+            spi_cmd <= 14'd0;
+ 
+            r_cs <= 1'b0;
+            r_sck <= 1'b0;
+            r_spi_sr <= 1'b0;
+            state <= 3'b001;
+            clock_ctr <= 16'd0;
+            bit_ctr <= 9'd0;
+            valid <= 1'b0;
+            busy <= 1'b0;
         end
         else begin
-            state   <=  state_next;
-            clock_ctr<=  clock_ctr_next;
-            bit_ctr <=  bit_ctr_next;
-            valid   <=  valid_next;
-            busy    <= busy_next;
-            valid_flag<= valid_flag_next;
-            fifo    <=  fifo_next;
-            read_flag<= read_flag_next;
-            clock_reg <= clock_reg_next;
-            ts_cycle <= ts_cycle_next;
-            r_cs    <=  r_cs_next;
-            r_sck   <=  r_sck_next;
-            r_spi_sr<= r_spi_sr_next;
+            for(loop_counter=0; loop_counter<8; loop_counter=loop_counter+1) begin  
+            miso_buffer[loop_counter] <= miso_buffer_next[loop_counter];
+            end
+            miso_tail <= miso_tail_next;
+            for(loop_counter=0; loop_counter<8; loop_counter=loop_counter+1) begin  
+                mosi_buffer[loop_counter] <= mosi_buffer_next[loop_counter];
+            end
+            mosi_tail <= mosi_tail_next;
+            spi_ctrl <= spi_ctrl_next;
+            // spi_status_next = 4'd0;
+            spi_rdata <= spi_rdata_next;
+            spi_wdata <= spi_wdata_next;
+            spi_cmd <= spi_cmd_next;
+ 
+            r_cs <= r_cs_next;
+            r_sck <= r_sck_next;
+            r_spi_sr <= r_spi_sr_next;
+            state <= state_next;
+            clock_ctr <= clock_ctr_next;
+            bit_ctr <= bit_ctr_next;
+            valid <= valid_next;
+            busy <= busy_next;
         end
         
     end
