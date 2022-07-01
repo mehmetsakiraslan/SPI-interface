@@ -156,7 +156,7 @@ module ll_spi (
         busy_next = busy;
         
         bit_ctr_reg_next = bit_ctr_reg;        
-        read_flag = read_flag;
+        read_flag_next = read_flag;
         write_flag_next = write_flag;
         
         if(clock_ctr > 0) begin
@@ -225,7 +225,7 @@ module ll_spi (
                         r_cs_next = 1'b0;
                     end
                     else begin
-                        bit_ctr_reg_next = 12'd0;
+                        bit_ctr_reg_next = lenght<<3;
                         read_flag_next = 1'b0;
                     end
                 end
@@ -261,12 +261,12 @@ module ll_spi (
                    r_sck_next = 1'b0;
                    if(bit_ctr_reg > 12'd32)begin
                         bit_ctr_reg_next = bit_ctr_reg - 12'd32;
-                        read_flag_next = 1'b1;
+                        write_flag_next = 1'b1;
                         r_cs_next = 1'b0;
                     end
                     else begin
-                        bit_ctr_reg_next = 12'd0;
-                        read_flag_next = 1'b0;
+                        bit_ctr_reg_next = lenght<<3;
+                        write_flag_next = 1'b0;
                     end
                 end
                 else begin
